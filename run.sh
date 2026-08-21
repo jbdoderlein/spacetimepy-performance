@@ -2,6 +2,7 @@
 # Discord.py
 
 cd discord.py
+git reset --hard
 sed -i 's/requires-python = ">=3\.8"/requires-python = ">=3.12"/' pyproject.toml
 uv venv
 uv sync --all-extras
