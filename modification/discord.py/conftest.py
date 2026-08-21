@@ -5,7 +5,7 @@ import pytest
 
 def pytest_configure(config):
     # One-time initialization before any test runs
-    stp = spacetimepy.SpaceTime.open("performance.db")
+    stp = spacetimepy.SpaceTime.open("performance.db", profile_capture=True)
     print("at start", stp)
     stp.capture.begin_recording()
 
