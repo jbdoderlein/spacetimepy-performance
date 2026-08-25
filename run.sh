@@ -27,7 +27,7 @@ test_discordpy(){
     setup_pyenv
     uv run pytest > ../results/raw/discordpy_wm_wf
     mv performance.db ../results/raw/discordpy_db_prof.db
-
+    reset_env
     cd ..
 }
 
@@ -49,7 +49,7 @@ test_beets(){
     setup_pyenv
     uv run pytest > ../results/raw/beets_wm_wf
     mv performance.db ../results/raw/beets_db_prof.db
-
+    reset_env
     cd ..
 }
 
@@ -73,6 +73,7 @@ test_cherrypy(){
     setup_pyenv
     uv run pytest > ../results/raw/cherrypy_wm_wf
     mv performance.db ../results/raw/cherrypy_db_prof.db
+    reset_env
     cd ..
 }
 
@@ -95,6 +96,34 @@ test_dspy(){
     setup_pyenv
     uv run pytest > ../results/raw/dspy_wm_wf
     mv performance.db ../results/raw/dspy_db_prof.db
+    reset_env
+    cd ..
+}
+
+test_pymisp(){
+    # pymisp
+    cd pymisp
+
+    echo "pymisp tests"
+    # without spacetime
+    reset_env
+    git submodule update --init
+    sed -i 's/requires-python = ">=3\.10,<4\.0"/requires-python = ">=3.12"/' pyproject.toml
+    uv add pytest
+    setup_pyenv
+    uv run pytest > ../results/raw/pymisp_wtm
+
+    reset_env
+    git submodule update --init
+    sed -i 's/requires-python = ">=3\.10,<4\.0"/requires-python = ">=3.12"/' pyproject.toml
+    uv add git+https://github.com/jbdoderlein/SpaceTimePy
+    uv add pytest
+    cp ../modification/pymisp/conftest.py tests/conftest.py
+    #cp ../modification/pymisp/spacetimepy_picklers.py tests/spacetimepy_picklers.py
+    setup_pyenv
+    uv run pytest > ../results/raw/pymisp_wm_wf
+    mv performance.db ../results/raw/pymisp_db_prof.db
+    reset_env
     cd ..
 }
 
