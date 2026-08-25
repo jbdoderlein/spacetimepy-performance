@@ -2,22 +2,14 @@
 import spacetimepy
 import pytest
 
-from discord import spacetimepy_custom_pickler
-
 
 def pytest_configure(config):
     # One-time initialization before any test runs
-    stp = spacetimepy.SpaceTime.open(
-        "performance.db",
-        custom_picklers=(spacetimepy_custom_pickler,),
-        # Only when finding serialization problem
-        #profile_capture=True,
-        #logging_level="WARNING",
-    )
-    print("at start   ", stp)
+    stp = spacetimepy.SpaceTime.open("performance.db", profile_capture=True)
     stp.capture.begin_recording()
 
 def pytest_unconfigure(config):
+    # One-time initialization before any test runs
     stp = spacetimepy.get_active_spacetime()
     assert stp is not None
     stp.capture.finish_recording()

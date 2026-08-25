@@ -1,3 +1,18 @@
 [submodule "discord.py"]
 	path = discord.py
 	url = https://github.com/Rapptz/discord.py
+[submodule "beets"]
+	path = beets
+	url = https://github.com/beetbox/beets
+[submodule "cherrypy"]
+	path = cherrypy
+	url = https://github.com/cherrypy/cherrypy
+[submodule "dspy"]
+	path = dspy
+	url = https://github.com/stanfordnlp/dspy
+[submodule "gensim"]
+	path = gensim
+	url = https://github.com/piskvorky/gensim
+[submodule "trimesh"]
+	path = trimesh
+	url = https://github.com/mikedh/trimesh

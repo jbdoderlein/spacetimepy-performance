@@ -1,0 +1,28 @@
+[project]
+name = "spacetimepy-performance"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Jean-Baptiste Doderlein", email = "jean.baptiste.doderlein@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "ipykernel>=7.3.0",
+    "jinja2>=3.1.6",
+    "matplotlib>=3.11.1",
+    "numpy>=2.5.2",
+    "pandas>=3.0.5",
+    "seaborn>=0.13.2",
+    "spacetimepy",
+]
+
+[project.scripts]
+spacetimepy-performance = "spacetimepy_performance:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+spacetimepy = { git = "https://github.com/jbdoderlein/SpaceTimePy" }

@@ -1,1 +1,4 @@
 results/raw/*
+.reports
+.venv
+.vscode
