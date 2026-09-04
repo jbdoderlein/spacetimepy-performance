@@ -1,5 +1,9 @@
-# SpaceTimePy Performance
+# SpaceTimePy performance experiments
 
-Repo containing all script to enable measuring performance of SpaceTimePy on multiple github repo
+This repository contains two types of SpaceTimePy performance experiment.
 
-The repo contain submodule of the git repo + a script to move file to modify repo to make the measurement
+- `run.sh` measures line capture across five Python project test suites.
+- [`humaneval/`](humaneval/) measures canonical HumanEval+ programs directly.
+
+The HumanEval experiment also checks captured data through SpaceTimePy v2
+replay. See [`humaneval/README.md`](humaneval/README.md) for its commands.
