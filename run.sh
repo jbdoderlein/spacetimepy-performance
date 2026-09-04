@@ -119,7 +119,7 @@ test_pymisp(){
     uv add git+https://github.com/jbdoderlein/SpaceTimePy
     uv add pytest
     cp ../modification/pymisp/conftest.py tests/conftest.py
-    #cp ../modification/pymisp/spacetimepy_picklers.py tests/spacetimepy_picklers.py
+    cp ../modification/pymisp/spacetimepy_custom_pickler.py spacetimepy_custom_pickler.py
     setup_pyenv
     uv run pytest > ../results/raw/pymisp_wm_wf
     mv performance.db ../results/raw/pymisp_db_prof.db
@@ -128,30 +128,10 @@ test_pymisp(){
 }
 
 
-test_discordpy
+#test_discordpy
 test_beets
-test_cherrypy
-test_dspy
+#test_cherrypy
+#test_dspy
+#test_pymisp
 
 
-
-: '
-
-# gensim
-cd trimesh
-
-echo "trimesh tests"
-# without spacetime
-reset_env
-sed -i 's/requires-python = ">=3\.10"/requires-python = ">=3.12"/' pyproject.toml
-setup_pyenv
-uv run pytest > ../results/raw/trimesh_wtm
-
-reset_env
-sed -i 's/requires-python = ">=3\.10"/requires-python = ">=3.12"/' pyproject.toml
-uv add git+https://github.com/jbdoderlein/SpaceTimePy
-cp ../modification/trimesh/conftest.py tests/conftest.py
-setup_pyenv
-uv run pytest > ../results/raw/trimesh_wm_wf
-mv performance.db ../results/raw/trimesh_db_prof.db
-'

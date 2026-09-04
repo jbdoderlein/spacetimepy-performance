@@ -1,16 +1,18 @@
 # conftest.py
-import spacetimepy
+import spacetimepy  # type: ignore[import-untyped]
 import pytest
+
+import spacetimepy_custom_pickler
 
 
 def pytest_configure(config):
     # One-time initialization before any test runs
     stp = spacetimepy.SpaceTime.open(
         "performance.db",
-        #custom_picklers=(spacetimepy_custom_pickler,),
+        custom_picklers=(spacetimepy_custom_pickler,),
         # Only when finding serialization problem
         profile_capture=True,
-        logging_level="WARNING",
+        #logging_level="WARNING",
     )
     print("at start   ", stp)
     stp.capture.begin_recording()

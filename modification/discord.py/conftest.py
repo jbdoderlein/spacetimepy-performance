@@ -11,7 +11,7 @@ def pytest_configure(config):
         "performance.db",
         custom_picklers=(spacetimepy_custom_pickler,),
         # Only when finding serialization problem
-        #profile_capture=True,
+        profile_capture=True,
         #logging_level="WARNING",
     )
     print("at start   ", stp)
