@@ -7,8 +7,7 @@ The reducers exclude only the runtime attributes listed below.
 * ``Neo4j.driver`` owns network connections and synchronization objects.
   PyMISP does not retain the connection arguments that could create a new
   driver. The restored object is disconnected.
-* ``PyMISP._prepare_request`` is excluded only when ``patch.object`` installs
-  a ``Mock`` on the instance. The class method becomes active after restore.
+* Mocked methods and mocked Neo4j drivers retain their behavior and state.
 * ``_AssertRaisesContext.test_case._outcome`` refers to the active test
   runner. It can contain generators, frames, and raw traceback objects.
 * A bound test method that pytest installs on a ``TestCase`` instance is
@@ -26,8 +25,8 @@ import hashlib
 import traceback
 from dataclasses import dataclass
 from typing import Any, Callable
+from unittest import mock
 from unittest.case import _AssertRaisesContext
-from unittest.mock import Mock
 
 import dill  # type: ignore[import-untyped]
 
@@ -154,8 +153,11 @@ def _set_file_object_state(
 
 def _reduce_neo4j(value: Neo4j) -> tuple[Any, ...]:
     dictionary, slots = _instance_state(value)
-    had_driver = "driver" in dictionary
-    dictionary.pop("driver", None)
+    had_driver = "driver" in dictionary and not isinstance(
+        dictionary["driver"], mock.NonCallableMock
+    )
+    if had_driver:
+        dictionary.pop("driver")
     state = (dictionary, slots, had_driver)
     return (
         _new_without_init,
@@ -178,9 +180,6 @@ def _set_neo4j_state(
 
 def _reduce_pymisp(value: PyMISP) -> tuple[Any, ...]:
     dictionary, slots = _instance_state(value)
-    patched_request = dictionary.get("_prepare_request")
-    if isinstance(patched_request, Mock):
-        dictionary.pop("_prepare_request")
     return (
         _new_without_init,
         (type(value),),
@@ -306,12 +305,49 @@ def _install_subclass_reducers() -> None:
     PyMISP.__reduce__ = _reduce_pymisp
 
 
+def _apply_mock_state(value: object, state: dict[str, Any]) -> None:
+    vars(value).update(state)
+    if isinstance(value, mock.MagicMixin):
+        value._mock_set_magics()
+        # Special methods belong to each generated class, not just its instance.
+        for name, child in state.items():
+            if name in mock._all_magics:
+                setattr(value, name, child)
+
+
+def _reduce_mock(value: mock.NonCallableMock, protocol: int):
+    """Keep mock state without serializing its per-instance generated class."""
+    python_type = type(value).__bases__[0]
+    if not issubclass(python_type, mock.NonCallableMock):
+        raise TypeError("This mock has an unsupported generated base class")
+    return python_type, (), vars(value).copy(), None, None, _apply_mock_state
+
+
+def _construct_mock_call(values: tuple[Any, ...]) -> mock._Call:
+    return mock._Call(values, two=len(values) == 2)
+
+
+def _reduce_mock_call(value: mock._Call):
+    # Restore fields after memoization to preserve shared parent references.
+    return (
+        _construct_mock_call,
+        (tuple(value),),
+        vars(value).copy(),
+        None,
+        None,
+        _apply_mock_state,
+    )
+
+
 def get_dispatch_table() -> dict[type[Any], Reducer]:
     """Return exact target types and their copyreg-style Dill reducers."""
+    # Mocks create concrete subclasses after the dispatch table is built.
+    mock.NonCallableMock.__reduce_ex__ = _reduce_mock
     _install_subclass_reducers()
     hash_type = type(hashlib.new("sha256"))
     dill.register(hash_type)(_save_hash_with_dill)
     reducers: dict[type[Any], Reducer] = {
+        mock._Call: _reduce_mock_call,
         hash_type: _reduce_hash,
         _AssertRaisesContext: _reduce_assert_raises_context,
         FileObject: _reduce_file_object,

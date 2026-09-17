@@ -49,6 +49,7 @@ test_beets(){
     setup_pyenv
     uv run pytest > ../results/raw/beets_wm_wf
     mv performance.db ../results/raw/beets_db_prof.db
+    mv serialization.log ../results/raw/beets_serialization.log
     reset_env
     cd ..
 }
@@ -109,7 +110,7 @@ test_pymisp(){
     reset_env
     git submodule update --init
     sed -i 's/requires-python = ">=3\.10,<4\.0"/requires-python = ">=3.12"/' pyproject.toml
-    uv add pytest
+    uv add pytest "pure-magic-rs==0.4.3"
     setup_pyenv
     uv run pytest > ../results/raw/pymisp_wtm
 
@@ -117,7 +118,7 @@ test_pymisp(){
     git submodule update --init
     sed -i 's/requires-python = ">=3\.10,<4\.0"/requires-python = ">=3.12"/' pyproject.toml
     uv add git+https://github.com/jbdoderlein/SpaceTimePy
-    uv add pytest
+    uv add pytest "pure-magic-rs==0.4.3"
     cp ../modification/pymisp/conftest.py tests/conftest.py
     cp ../modification/pymisp/spacetimepy_custom_pickler.py spacetimepy_custom_pickler.py
     setup_pyenv
@@ -129,9 +130,8 @@ test_pymisp(){
 
 
 #test_discordpy
-test_beets
+#test_beets
 #test_cherrypy
 #test_dspy
-#test_pymisp
-
+test_pymisp
 

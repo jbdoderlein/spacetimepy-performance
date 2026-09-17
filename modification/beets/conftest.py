@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import logging as std_logging
 import os
 import sys
 from typing import TYPE_CHECKING
@@ -18,6 +19,46 @@ from beets.util import cached_classproperty
 import spacetimepy
 import test.spacetimepy_picklers
 
+
+_CAPTURE_LOG = pytest.StashKey[tuple[std_logging.Handler, bool]]()
+
+
+def _capture_options(function):
+    """Exclude confirmed runtime values at their specific capture sites."""
+    identity = (function.__module__, function.__qualname__)
+    registry_sites = {
+        ("test.autotag.test_hooks", "test_correct_list_fields"),
+        ("test.ui.test_ui_init", "ParentalDirCreation.test_create_no"),
+        ("test.ui.test_ui_init", "ParentalDirCreation.test_create_yes"),
+    }
+    excluded = {}
+    if identity in registry_sites:
+        excluded["dispatch_table"] = {
+            "scope": "global",
+            "reason": (
+                "copyreg.dispatch_table is the process serialization registry, "
+                "reached through copy.deepcopy. It is not Beets application data."
+            ),
+        }
+    if identity == (
+        "test.test_logging", "TestConcurrentEvents.test_concurrent_events"
+    ):
+        for name in ("t1", "t2"):
+            excluded[name] = {
+                "scope": "local",
+                "reason": "A live operating-system thread cannot be restored.",
+            }
+    if not excluded:
+        return {}
+
+    def metadata(*_):
+        return {"capture_exclusion_policy": excluded}
+
+    return {
+        "ignored_names": tuple(excluded),
+        "start_attributes": metadata,
+        "line_attributes": metadata,
+    }
 
 if TYPE_CHECKING:
     from typing import TextIO
@@ -64,7 +105,7 @@ def pytest_collection_modifyitems(
                 )
 
         if isinstance(item, pytest.Function) and item.name.startswith("test_"):
-            item.obj = spacetimepy.line(item.obj)
+            item.obj = spacetimepy.line(item.obj, **_capture_options(item.obj))
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -82,14 +123,37 @@ def pytest_configure(config: pytest.Config) -> None:
             " is importable (use force_ci=False to allow CI to skip the test too)"
         ),
     )
-    stp = spacetimepy.SpaceTime.open("performance.db", profile_capture=True, custom_picklers=[test.spacetimepy_picklers])
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+    # Build the exact-type reducer table after pytest imports the test classes.
+    # Keep capture diagnostics outside the application logs that tests assert.
+    logger = std_logging.getLogger("spacetimepy")
+    handler = std_logging.FileHandler("serialization.log", mode="w")
+    session.config.stash[_CAPTURE_LOG] = (handler, logger.propagate)
+    logger.addHandler(handler)
+    logger.propagate = False
+    stp = spacetimepy.SpaceTime.open(
+        "performance.db",
+        profile_capture=True,
+        custom_picklers=[test.spacetimepy_picklers],
+    )
     stp.capture.begin_recording()
 
+
 def pytest_unconfigure(config):
-    # One-time initialization before any test runs
     stp = spacetimepy.get_active_spacetime()
-    assert stp is not None
-    stp.capture.finish_recording()
+    try:
+        if stp is not None:
+            stp.capture.finish_recording()
+            stp.close()
+    finally:
+        if _CAPTURE_LOG in config.stash:
+            handler, propagate = config.stash[_CAPTURE_LOG]
+            logger = std_logging.getLogger("spacetimepy")
+            logger.removeHandler(handler)
+            logger.propagate = propagate
+            handler.close()
 
 
 def pytest_make_parametrize_id(config, val, argname):

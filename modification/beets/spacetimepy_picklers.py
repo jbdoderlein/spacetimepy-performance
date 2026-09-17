@@ -7,11 +7,9 @@ pytest nodes, generator frames, Python frames, or raw tracebacks.
 
 from __future__ import annotations
 
-import importlib
 import inspect
 import io
 import logging
-import os
 import socket
 import sqlite3
 import subprocess
@@ -22,8 +20,9 @@ import unittest
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, cast
+from unittest import mock
 
 from _pytest._code.code import ExceptionInfo, Traceback
 from _pytest.capture import CaptureFixture, EncodedFile
@@ -35,10 +34,9 @@ from _pytest.logging import (
 )
 from _pytest.monkeypatch import MonkeyPatch
 from _pytest.stash import Stash
-from requests.adapters import HTTPAdapter
-
 from beets.dbcore.db import Database
-from beets.test.helper import TestHelper
+from beets.test.helper import AutotagStub, TestHelper
+from requests.adapters import HTTPAdapter
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -55,42 +53,13 @@ _DATABASE_RUNTIME_ATTRIBUTES = frozenset(
         "_db_lock",
     }
 )
-_TEST_RUNTIME_ATTRIBUTES = frozenset(
-    {
-        # The request owns the active pytest node and plugin graph.
-        "request",
-        # The patcher owns active process-wide environment changes.
-        "env_patcher",
-        # These fields belong to the active unittest execution.
-        "_outcome",
-        "_cleanups",
-        "_subtest",
-    }
-)
-_THREAD_RUNTIME_ATTRIBUTES = frozenset(
-    {
-        # The handle refers to one operating-system thread.
-        "_handle",
-        # The event contains a lock from the original execution.
-        "_started",
-        # These values do not identify a thread in the restore process.
-        "_ident",
-        "_native_id",
-        # The stream can be a live pytest capture stream.
-        "_stderr",
-        # The hook refers to the original thread and error stream.
-        "_invoke_excepthook",
-    }
-)
-_STARTED_THREAD_CALL_ATTRIBUTES = frozenset(
-    {
-        # A started thread cannot execute its target again after restoration.
-        "_target",
-        # The arguments can contain locks from the original execution.
-        "_args",
-        "_kwargs",
-    }
-)
+_TEST_RUNTIME_ATTRIBUTES = {
+    "request": "The request owns the active pytest node and plugin graph.",
+    "env_patcher": "The patcher controls the original process environment.",
+    "_outcome": "The outcome belongs to the active unittest execution.",
+    "_cleanups": "Cleanup callbacks belong to the active unittest execution.",
+    "_subtest": "The subtest belongs to the active unittest execution.",
+}
 
 
 def _subclasses(python_type: type) -> set[type]:
@@ -107,12 +76,12 @@ def _beets_test_types() -> set[type]:
     selected = {
         python_type
         for python_type in _subclasses(TestHelper)
-        if python_type.__module__.startswith("test.")
+        if python_type.__module__.startswith(("test.", "test_"))
     }
     selected.update(
         python_type
         for python_type in _subclasses(unittest.TestCase)
-        if python_type.__module__.startswith("test.")
+        if python_type.__module__.startswith(("test.", "test_"))
     )
     selected.add(TestHelper)
     return selected
@@ -122,28 +91,67 @@ def _construct_test_object(python_type: type) -> object:
     return object.__new__(python_type)
 
 
-def _reduce_test_object(value: object):
-    """Keep test data and remove the active pytest execution context."""
-    state = {
-        name: child
-        for name, child in vars(value).items()
-        if name not in _TEST_RUNTIME_ATTRIBUTES
-    }
+def _reduce_partial_object(value: object, exclusions: Mapping[str, str]):
+    """Keep data and record each omitted runtime field on the restored object."""
+    state = vars(value).copy()
+    omitted = dict(state.get("_spacetimepy_excluded_attributes", {}))
+    for name, reason in exclusions.items():
+        if name not in state:
+            continue
+        child = state.pop(name)
+        child_type = type(child)
+        omitted[name] = {
+            "type": f"{child_type.__module__}.{child_type.__qualname__}",
+            "reason": reason,
+        }
+    if omitted:
+        state["_spacetimepy_excluded_attributes"] = omitted
     return _construct_test_object, (type(value),), state
 
 
-def _database_snapshot(value: Database) -> bytes | None:
+def _reduce_test_object(value: object):
+    """Keep test data without pytest execution state or a live Flask client."""
+    exclusions = _TEST_RUNTIME_ATTRIBUTES.copy()
+    for name, child in vars(value).items():
+        if isinstance(child, (mock._patch, mock._patch_dict)):
+            exclusions[name] = (
+                "The patch controller mutates objects in the original process."
+            )
+    client = vars(value).get("client")
+    if type(client).__module__ == "flask.testing":
+        exclusions["client"] = (
+            "The Flask client owns live application and request contexts."
+        )
+    return _reduce_partial_object(value, exclusions)
+
+
+def _reduce_autotag_stub(value: AutotagStub):
+    return _reduce_partial_object(value, {
+        "patchers": "Active patchers control methods in the original process.",
+    })
+
+
+def _database_snapshot(value: Database) -> tuple[bytes | None, bool]:
     connections = tuple(value._connections.values())
+    closed = False
     if connections:
-        return connections[0].serialize()
+        connection = connections[0]
+        try:
+            connection.total_changes
+        except sqlite3.ProgrammingError:
+            closed = True
+        else:
+            return connection.serialize(), False
 
     if value.path != Path(":memory:") and value.path.exists():
-        connection = sqlite3.connect(value.path)
+        connection = sqlite3.connect(
+            value.path.absolute().as_uri() + "?mode=ro", uri=True
+        )
         try:
-            return connection.serialize()
+            return connection.serialize(), closed
         finally:
             connection.close()
-    return None
+    return None, closed
 
 
 def _construct_database(python_type: type[Database]) -> Database:
@@ -151,21 +159,24 @@ def _construct_database(python_type: type[Database]) -> Database:
 
 
 def _apply_database_state(value: Database, state: dict[str, Any]) -> None:
-    data = state.pop("_spacetimepy_database")
+    data, closed = state.pop("_spacetimepy_database")
     vars(value).update(state)
     value._connections = {}
     value._tx_stacks = defaultdict(list)
     value._shared_map_lock = threading.Lock()
     value._db_lock = threading.Lock()
 
-    if data is not None:
+    if data is not None or closed:
         connection = sqlite3.connect(":memory:", check_same_thread=False)
-        connection.deserialize(data)
+        if data is not None:
+            connection.deserialize(data)
         value.add_functions(connection)
         connection.row_factory = sqlite3.Row
         thread_id = threading.current_thread().ident
         assert thread_id is not None
         value._connections[thread_id] = connection
+        if closed:
+            connection.close()
 
 
 def _reduce_database(value: Database):
@@ -429,6 +440,22 @@ def _apply_object_state(value: object, state: dict[str, Any]) -> None:
     vars(value).update(state)
 
 
+def _construct_mock_call(values: tuple[Any, ...]) -> mock._Call:
+    return mock._Call(values, two=len(values) == 2)
+
+
+def _reduce_mock_call(value: mock._Call):
+    # Apply fields after memoization. Chained calls can reference their parent.
+    return (
+        _construct_mock_call,
+        (tuple(value),),
+        vars(value).copy(),
+        None,
+        None,
+        _apply_object_state,
+    )
+
+
 def _reduce_log_record(value: logging.LogRecord):
     """Keep exception data and formatted text without a raw traceback."""
     state = vars(value).copy()
@@ -491,89 +518,12 @@ def _reduce_log_capture_fixture(value: LogCaptureFixture):
     )
 
 
-@dataclass(frozen=True)
-class _ModuleReference:
-    """Identify a MonkeyPatch module target without copying its graph."""
-
-    module_name: str
-
-
-def _safe_reference(value: object) -> object:
-    if isinstance(value, ModuleType):
-        return _ModuleReference(value.__name__)
-    if value is os.environ:
-        return _ModuleReference("os.environ")
-    return value
-
-
-def _restore_safe_reference(value: object) -> object:
-    if isinstance(value, _ModuleReference):
-        if value.module_name == "os.environ":
-            return os.environ
-        return importlib.import_module(value.module_name)
-    return value
-
-
-def _construct_monkeypatch() -> MonkeyPatch:
-    return object.__new__(MonkeyPatch)
-
-
-def _apply_monkeypatch_state(value: MonkeyPatch, state: dict[str, Any]) -> None:
-    state["_setattr"] = [
-        tuple(_restore_safe_reference(child) for child in operation)
-        for operation in state["_setattr"]
-    ]
-    state["_setitem"] = [
-        tuple(_restore_safe_reference(child) for child in operation)
-        for operation in state["_setitem"]
-    ]
-    vars(value).update(state)
-
-
 def _reduce_monkeypatch(value: MonkeyPatch):
-    """Keep undo operations without copying complete module graphs."""
-    state = vars(value).copy()
-    state["_setattr"] = [
-        tuple(_safe_reference(child) for child in operation)
-        for operation in value._setattr
-    ]
-    state["_setitem"] = [
-        tuple(_safe_reference(child) for child in operation)
-        for operation in value._setitem
-    ]
-    return (
-        _construct_monkeypatch,
-        (),
-        state,
-        None,
-        None,
-        _apply_monkeypatch_state,
-    )
-
-
-def _restore_thread(python_type: type[threading.Thread], started: int):
-    restored = object.__new__(python_type)
-    threading.Thread.__init__(restored)
-    if started:
-        restored_runtime = cast(Any, restored)
-        restored_runtime._handle = cast(Any, threading)._make_thread_handle(0)
-        restored_runtime._started.set()
-        restored_runtime._handle._set_done()
-    return restored
-
-
-def _reduce_thread(value: threading.Thread):
-    """Restore a new thread or a safe completed view of a started thread."""
-    started = cast(Any, value)._started.is_set()
-    excluded = _THREAD_RUNTIME_ATTRIBUTES
-    if started:
-        excluded |= _STARTED_THREAD_CALL_ATTRIBUTES
-    state = {
-        name: child
-        for name, child in vars(value).items()
-        if name not in excluded
-    }
-    return _restore_thread, (type(value), int(started)), state
+    """Keep path data without undo operations on the original process."""
+    return _reduce_partial_object(value, {
+        "_setattr": "Undo records mutate objects in the original process.",
+        "_setitem": "Undo records mutate mappings in the original process.",
+    })
 
 
 def _construct_process(python_type: type[subprocess.Popen[Any]]):
@@ -709,9 +659,30 @@ def _reduce_gio_uri(value: object):
     return _construct_gio_uri, (type(value),), state
 
 
+def _apply_mock_state(value: object, state: dict[str, Any]) -> None:
+    vars(value).update(state)
+    if isinstance(value, mock.MagicMixin):
+        value._mock_set_magics()
+        # Special methods belong to each generated class, not just its instance.
+        for name, child in state.items():
+            if name in mock._all_magics:
+                setattr(value, name, child)
+
+
+def _reduce_mock(value: mock.NonCallableMock, protocol: int):
+    """Keep mock state without serializing its per-instance generated class."""
+    python_type = type(value).__bases__[0]
+    if not issubclass(python_type, mock.NonCallableMock):
+        raise TypeError("This mock has an unsupported generated base class")
+    return python_type, (), vars(value).copy(), None, None, _apply_mock_state
+
+
 def get_dispatch_table() -> Mapping[type[Any], Callable[[Any], Any]]:
     """Return exact Python types mapped to copyreg-style Dill reducers."""
+    # Mocks create concrete subclasses after the dispatch table is built.
+    mock.NonCallableMock.__reduce_ex__ = _reduce_mock
     dispatch: dict[type[Any], Callable[[Any], Any]] = {
+        AutotagStub: _reduce_autotag_stub,
         CaptureFixture: _reduce_capture_fixture,
         Database: _reduce_database,
         EncodedFile: _reduce_encoded_file,
@@ -719,13 +690,13 @@ def get_dispatch_table() -> Mapping[type[Any], Callable[[Any], Any]]:
         HTTPAdapter: _reduce_http_adapter,
         LogCaptureFixture: _reduce_log_capture_fixture,
         MonkeyPatch: _reduce_monkeypatch,
+        mock._Call: _reduce_mock_call,
         logging.LogRecord: _reduce_log_record,
         socket.socket: _reduce_socket,
         sqlite3.Connection: _reduce_sqlite_connection,
         sqlite3.Cursor: _reduce_sqlite_cursor,
         sqlite3.Row: _reduce_sqlite_row,
         subprocess.Popen: _reduce_process,
-        threading.Thread: _reduce_thread,
         types.GeneratorType: _reduce_generator,
         types.TracebackType: _reduce_traceback,
     }
@@ -737,9 +708,6 @@ def get_dispatch_table() -> Mapping[type[Any], Callable[[Any], Any]]:
     dispatch.update(dict.fromkeys(_subclasses(socket.socket), _reduce_socket))
     dispatch.update(
         dict.fromkeys(_subclasses(subprocess.Popen), _reduce_process)
-    )
-    dispatch.update(
-        dict.fromkeys(_subclasses(threading.Thread), _reduce_thread)
     )
 
     try:

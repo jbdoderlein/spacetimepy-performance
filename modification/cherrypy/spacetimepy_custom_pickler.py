@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from http.client import HTTPConnection, HTTPResponse
 from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import DEFAULT, MagicMock, call
+from unittest import mock
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -104,84 +104,13 @@ class _ModuleReference:
     module_name: str
 
 
-class _MagicMockSnapshot:
-    """Store the durable call state of one Bus callback mock."""
-
-    def __init__(self, value: MagicMock) -> None:
-        self.name = value._mock_name
-        # Python 3.13 cannot restore the runtime-generated ``_Call`` class.
-        self.calls = [
-            (record.args, record.kwargs) for record in value.call_args_list
-        ]
-        self.side_effect = value._mock_side_effect
-        self.return_value = value._mock_return_value
-        if isinstance(self.return_value, MagicMock):
-            if self.return_value._mock_new_parent is value:
-                # This child has a runtime-generated class and no user state.
-                self.return_value = DEFAULT
-
-
-def _restore_magic_mock(state: _MagicMockSnapshot) -> MagicMock:
-    restored = MagicMock(name=state.name, side_effect=state.side_effect)
-    calls = [call(*args, **keywords) for args, keywords in state.calls]
-    restored._mock_called = bool(calls)
-    restored._mock_call_args = calls[-1] if calls else None
-    restored._mock_call_count = len(calls)
-    restored._mock_call_args_list = calls.copy()
-    restored._mock_mock_calls = calls.copy()
-    restored.method_calls = []
-    if state.return_value is not DEFAULT:
-        restored.return_value = state.return_value
-    return restored
-
-
 def _construct_bus(python_type: type[Bus]) -> Bus:
     return object.__new__(python_type)
 
 
-def _apply_bus_state(value: Bus, state: dict[str, Any]) -> None:
-    restored_mocks: dict[_MagicMockSnapshot, MagicMock] = {}
-
-    def restore_listener(listener: object) -> object:
-        if not isinstance(listener, _MagicMockSnapshot):
-            return listener
-        if listener not in restored_mocks:
-            restored_mocks[listener] = _restore_magic_mock(listener)
-        return restored_mocks[listener]
-
-    state['listeners'] = {
-        channel: {restore_listener(listener) for listener in listeners}
-        for channel, listeners in state['listeners'].items()
-    }
-    state['_priorities'] = {
-        (channel, restore_listener(listener)): priority
-        for (channel, listener), priority in state['_priorities'].items()
-    }
-    vars(value).update(state)
-
-
 def _reduce_bus(value: Bus):
-    """Keep Bus configuration and its listener/plug-in reference graph."""
-    snapshots: dict[int, _MagicMockSnapshot] = {}
-
-    def snapshot_listener(listener: object) -> object:
-        if not isinstance(listener, MagicMock):
-            return listener
-        identity = id(listener)
-        if identity not in snapshots:
-            snapshots[identity] = _MagicMockSnapshot(listener)
-        return snapshots[identity]
-
-    state = vars(value).copy()
-    state['listeners'] = {
-        channel: {snapshot_listener(listener) for listener in listeners}
-        for channel, listeners in value.listeners.items()
-    }
-    state['_priorities'] = {
-        (channel, snapshot_listener(listener)): priority
-        for (channel, listener), priority in value._priorities.items()
-    }
-    return _construct_bus, (type(value),), state, None, None, _apply_bus_state
+    """Keep listeners, priorities, mocks, and shared graph references."""
+    return _construct_bus, (type(value),), vars(value).copy()
 
 
 def _construct_monitor(python_type: type[Monitor]) -> Monitor:
@@ -596,9 +525,46 @@ def _reduce_monkeypatch(value: MonkeyPatch):
     )
 
 
+def _apply_mock_state(value: object, state: dict[str, Any]) -> None:
+    vars(value).update(state)
+    if isinstance(value, mock.MagicMixin):
+        value._mock_set_magics()
+        # Special methods belong to each generated class, not just its instance.
+        for name, child in state.items():
+            if name in mock._all_magics:
+                setattr(value, name, child)
+
+
+def _reduce_mock(value: mock.NonCallableMock, protocol: int):
+    """Keep mock state without serializing its per-instance generated class."""
+    python_type = type(value).__bases__[0]
+    if not issubclass(python_type, mock.NonCallableMock):
+        raise TypeError("This mock has an unsupported generated base class")
+    return python_type, (), vars(value).copy(), None, None, _apply_mock_state
+
+
+def _construct_mock_call(values: tuple[Any, ...]) -> mock._Call:
+    return mock._Call(values, two=len(values) == 2)
+
+
+def _reduce_mock_call(value: mock._Call):
+    # Restore fields after memoization to preserve shared parent references.
+    return (
+        _construct_mock_call,
+        (tuple(value),),
+        vars(value).copy(),
+        None,
+        None,
+        _apply_mock_state,
+    )
+
+
 def get_dispatch_table() -> dict[type, Callable[[Any], Any]]:
     """Return exact Python types mapped to copyreg-style Dill reducers."""
+    # Mocks create concrete subclasses after the dispatch table is built.
+    mock.NonCallableMock.__reduce_ex__ = _reduce_mock
     dispatch_table: dict[type, Callable[[Any], Any]] = {
+        mock._Call: _reduce_mock_call,
         EncodedFile: _reduce_encoded_file,
         itertools.count: _reduce_count,
         threading.Thread: _reduce_thread,
